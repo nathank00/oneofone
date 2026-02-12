@@ -1,0 +1,6 @@
+pandas
+supabase
+nba_api
+dotenv
+requests
+tqdm
