@@ -1,7 +1,12 @@
 
 venv
 *.env
+*.env.local
 */models/*
 .claude
 *__pycache__
 __pycache__
+
+# web
+node_modules
+.next

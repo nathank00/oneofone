@@ -270,7 +270,10 @@ def fetch_schedule_for_season(season_str):
         games = pd.DataFrame()
         games["GAME_ID"] = pd.to_numeric(raw["gameId"], errors="coerce").astype("Int64")
         games["SEASON_ID"] = season_str_to_year(season_str)
-        games["GAME_DATE"] = pd.to_datetime(raw["gameDateTimeUTC"], errors="coerce", utc=True)
+        # Convert UTC datetime to EST date, stored as midnight (consistent with other sources)
+        utc_dt = pd.to_datetime(raw["gameDateTimeUTC"], errors="coerce", utc=True)
+        est_dt = utc_dt.dt.tz_convert("America/New_York")
+        games["GAME_DATE"] = est_dt.dt.normalize().dt.tz_localize(None)
 
         # Team info
         games["HOME_ID"] = pd.to_numeric(raw["homeTeam_teamId"], errors="coerce").astype("Int64")
@@ -358,7 +361,8 @@ def fetch_scoreboard_for_date(game_date):
 
         games = pd.DataFrame()
         games["GAME_ID"] = pd.to_numeric(game_header["GAME_ID"], errors="coerce").astype("Int64")
-        games["GAME_DATE"] = pd.to_datetime(game_header["GAME_DATE_EST"], errors="coerce")
+        # GAME_DATE_EST is the game date in Eastern time — normalize to midnight
+        games["GAME_DATE"] = pd.to_datetime(game_header["GAME_DATE_EST"], errors="coerce").dt.normalize()
         games["HOME_ID"] = pd.to_numeric(game_header["HOME_TEAM_ID"], errors="coerce").astype("Int64")
         games["AWAY_ID"] = pd.to_numeric(game_header["VISITOR_TEAM_ID"], errors="coerce").astype("Int64")
         games["GAME_STATUS"] = pd.to_numeric(game_header["GAME_STATUS_ID"], errors="coerce").astype("Int64")

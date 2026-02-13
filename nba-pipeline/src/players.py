@@ -178,7 +178,7 @@ def upsert_players_to_supabase(df: pd.DataFrame):
 
 
 def main():
-    mode = sys.argv[1] if len(sys.argv) > 1 else "incremental"
+    mode = sys.argv[1] if len(sys.argv) > 1 else "current"
 
     if mode == "full":
         print("\n=== Running FULL mode: historical backfill + current update ===")

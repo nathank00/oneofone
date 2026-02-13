@@ -608,7 +608,7 @@ def run_current_mode():
 # ---------------------------------------------------------------------------
 def main():
     if len(sys.argv) < 2:
-        mode = "full"
+        mode = "current"
     else:
         mode = sys.argv[1].lower()
 

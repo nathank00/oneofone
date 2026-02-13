@@ -14,7 +14,8 @@ Usage: python predict.py
 
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -87,15 +88,19 @@ def load_model(path):
 # 2. Fetch today's scheduled games
 # ---------------------------------------------------------------------------
 def fetch_todays_games():
-    """Fetch gamelogs for today's date with GAME_STATUS=1 (scheduled)."""
-    now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_end = today_start + timedelta(days=1)
+    """Fetch gamelogs for today's date with GAME_STATUS=1 (scheduled).
+
+    "Today" is defined in US/Eastern time since all NBA games are scheduled
+    in ET. GAME_DATE is stored as the EST date at midnight (e.g.
+    2024-02-13T00:00:00+00:00), so we simply match on today's date.
+    """
+    eastern = ZoneInfo("America/New_York")
+    now_et = datetime.now(eastern)
+    today_str = now_et.strftime("%Y-%m-%dT00:00:00+00:00")
 
     filters = [
         ("eq", "GAME_STATUS", 1),
-        ("gte", "GAME_DATE", today_start.isoformat()),
-        ("lt", "GAME_DATE", today_end.isoformat()),
+        ("eq", "GAME_DATE", today_str),
     ]
 
     rows = fetch_paginated("gamelogs", "*", filters)
@@ -191,7 +196,7 @@ def predict_and_write(model, games_df):
 # ---------------------------------------------------------------------------
 def print_predictions(games_df, new_predictions_df):
     """Print formatted table of ALL today's predictions."""
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_str = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
 
     # Mark which games are new vs existing
     new_ids = set(new_predictions_df["GAME_ID"].tolist()) if not new_predictions_df.empty else set()
