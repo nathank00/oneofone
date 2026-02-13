@@ -288,8 +288,10 @@ def fetch_schedule_for_season(season_str):
         home_score = pd.to_numeric(raw["homeTeam_score"], errors="coerce")
         away_score = pd.to_numeric(raw["awayTeam_score"], errors="coerce")
 
-        games["HOME_PTS"] = np.where(games["GAME_STATUS"] == GAME_STATUS_FINAL, home_score, np.nan)
-        games["AWAY_PTS"] = np.where(games["GAME_STATUS"] == GAME_STATUS_FINAL, away_score, np.nan)
+        # Capture scores for both LIVE and FINAL games (live scores are in-progress)
+        has_score = games["GAME_STATUS"].isin([GAME_STATUS_LIVE, GAME_STATUS_FINAL])
+        games["HOME_PTS"] = np.where(has_score, home_score, np.nan)
+        games["AWAY_PTS"] = np.where(has_score, away_score, np.nan)
         games["HOME_PTS"] = pd.to_numeric(games["HOME_PTS"], errors="coerce").astype("Int64")
         games["AWAY_PTS"] = pd.to_numeric(games["AWAY_PTS"], errors="coerce").astype("Int64")
         games["TOTAL_PTS"] = (games["HOME_PTS"] + games["AWAY_PTS"]).astype("Int64")
@@ -306,9 +308,16 @@ def fetch_schedule_for_season(season_str):
 
         games["GAME_OUTCOME"] = games.apply(derive_outcome, axis=1)
 
-        # Handle postponed
+        # Handle postponed — the API field contains "A" (active) for normal games;
+        # only truly postponed games have a different value (e.g., "P", "Postponed").
+        # We must exclude "A" and blank/NA values to avoid marking all games as postponed.
         if "postponedStatus" in raw.columns:
-            postponed_mask = raw["postponedStatus"].notna() & (raw["postponedStatus"] != "")
+            postponed_mask = (
+                raw["postponedStatus"].notna()
+                & (raw["postponedStatus"] != "")
+                & (raw["postponedStatus"].str.strip() != "")
+                & (raw["postponedStatus"].str.upper() != "A")
+            )
             games.loc[postponed_mask, "GAME_STATUS"] = GAME_STATUS_POSTPONED
 
         games = games.drop_duplicates("GAME_ID")
@@ -326,11 +335,18 @@ def fetch_schedule_for_season(season_str):
 def fetch_scoreboard_for_date(game_date):
     """
     Fetch games for a specific date using ScoreboardV2.
+    The NBA API uses US/Eastern dates, so we convert from UTC if needed.
     Returns game metadata with status and scores.
     """
     try:
         sleep(random.uniform(0.8, 1.5))
-        date_str = game_date.strftime("%Y-%m-%d")
+        # NBA uses Eastern Time for game dates; convert from UTC if needed
+        if hasattr(game_date, 'tzinfo') and game_date.tzinfo is not None:
+            from zoneinfo import ZoneInfo
+            et = game_date.astimezone(ZoneInfo("America/New_York"))
+            date_str = et.strftime("%Y-%m-%d")
+        else:
+            date_str = game_date.strftime("%Y-%m-%d")
         sb = scoreboardv2.ScoreboardV2(game_date=date_str, league_id="00")
         frames = sb.get_data_frames()
 
@@ -358,6 +374,7 @@ def fetch_scoreboard_for_date(game_date):
         games["AWAY_NAME"] = games["AWAY_ID"].map(id_to_name)
 
         # Extract scores from LineScore (2 rows per game: home and visitor)
+        # Capture scores for both LIVE (status=2) and FINAL (status=3) games
         if not line_score.empty and "PTS" in line_score.columns:
             line_score["GAME_ID"] = pd.to_numeric(line_score["GAME_ID"], errors="coerce").astype("Int64")
             line_score["TEAM_ID"] = pd.to_numeric(line_score["TEAM_ID"], errors="coerce").astype("Int64")
@@ -372,7 +389,7 @@ def fetch_scoreboard_for_date(game_date):
                     if not home_ls.empty and not away_ls.empty:
                         h_pts = home_ls.iloc[0]["PTS"]
                         a_pts = away_ls.iloc[0]["PTS"]
-                        if row["GAME_STATUS"] == GAME_STATUS_FINAL:
+                        if row["GAME_STATUS"] in (GAME_STATUS_LIVE, GAME_STATUS_FINAL):
                             games.at[idx, "HOME_PTS"] = h_pts
                             games.at[idx, "AWAY_PTS"] = a_pts
                             games.at[idx, "TOTAL_PTS"] = h_pts + a_pts if pd.notna(h_pts) and pd.notna(a_pts) else np.nan
@@ -623,8 +640,8 @@ def merge_completed_and_schedule(completed_df, schedule_df):
 
         merged = pd.concat([merged, schedule_new], ignore_index=True)
 
-    # Also update any games that exist in both but schedule has newer status
-    # (e.g., game went from scheduled to final between LGF and schedule fetch)
+    # Also update any games that exist in both but schedule/scoreboard has a
+    # more advanced status (e.g., scheduled->live, scheduled->final, live->final)
     overlap_sched = schedule_df[schedule_df["GAME_ID"].isin(existing_ids)].copy()
     if not overlap_sched.empty:
         for _, srow in overlap_sched.iterrows():
@@ -632,15 +649,39 @@ def merge_completed_and_schedule(completed_df, schedule_df):
             mask = merged["GAME_ID"] == gid
             existing = merged.loc[mask]
             if not existing.empty:
-                existing_status = existing.iloc[0].get("GAME_STATUS")
-                sched_status = srow.get("GAME_STATUS")
-                # If schedule says final but LGF didn't have it, update
-                if pd.notna(sched_status) and sched_status == GAME_STATUS_FINAL and existing_status != GAME_STATUS_FINAL:
-                    merged.loc[mask, "GAME_STATUS"] = srow["GAME_STATUS"]
+                existing_status_raw = existing.iloc[0].get("GAME_STATUS")
+                sched_status_raw = srow.get("GAME_STATUS")
+
+                if pd.isna(sched_status_raw):
+                    continue
+                if pd.isna(existing_status_raw):
+                    existing_status_raw = GAME_STATUS_SCHEDULED
+
+                sched_status = int(sched_status_raw)
+                existing_status = int(existing_status_raw)
+
+                # Update if the new status is more advanced than existing
+                # (scheduled=1 < live=2 < final=3), or if it's postponed (4)
+                should_update = False
+                if sched_status == GAME_STATUS_LIVE and existing_status == GAME_STATUS_SCHEDULED:
+                    should_update = True
+                elif sched_status == GAME_STATUS_FINAL and existing_status != GAME_STATUS_FINAL:
+                    should_update = True
+                elif sched_status == GAME_STATUS_POSTPONED:
+                    should_update = True
+
+                if should_update:
+                    logger.debug(
+                        f"  Merge status upgrade GAME_ID={gid}: "
+                        f"{existing_status} -> {sched_status}"
+                    )
+                    merged.loc[mask, "GAME_STATUS"] = sched_status
+                    # Update scores if available (live in-progress or final)
                     if pd.notna(srow.get("HOME_PTS")):
                         merged.loc[mask, "HOME_PTS"] = srow["HOME_PTS"]
                         merged.loc[mask, "AWAY_PTS"] = srow["AWAY_PTS"]
                         merged.loc[mask, "TOTAL_PTS"] = srow["TOTAL_PTS"]
+                    if pd.notna(srow.get("GAME_OUTCOME")):
                         merged.loc[mask, "GAME_OUTCOME"] = srow["GAME_OUTCOME"]
 
     return merged.drop_duplicates("GAME_ID")

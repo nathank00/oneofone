@@ -1,0 +1,275 @@
+# nba-pipeline/src/train.py
+"""
+NBA Game Outcome Model — Training Script
+
+Trains an XGBoost binary classifier to predict home team wins.
+- Target: GAME_OUTCOME (1=home win, 0=away win)
+- Features: 52 rolling team stats + 8 derived difference features = 60 total
+- Split: chronological 80/20 (no future leakage)
+- Evaluation: ROC-AUC, accuracy, classification report, top feature importances
+- Output: saved model at nba-pipeline/models/nba_winner.json
+
+Usage: python train.py
+"""
+
+import sys
+from pathlib import Path
+from datetime import datetime, timezone
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "nba-pipeline" / "src"))
+
+import os
+import logging
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+from sklearn.metrics import roc_auc_score, accuracy_score, classification_report
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("supabase").setLevel(logging.WARNING)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# Import paginated fetch + supabase client from gamelogs
+from gamelogs import fetch_paginated, supabase
+
+MODEL_DIR = REPO_ROOT / "nba-pipeline" / "models"
+MODEL_PATH = MODEL_DIR / "nba_winner.json"
+
+# ---------------------------------------------------------------------------
+# Feature definitions
+# ---------------------------------------------------------------------------
+ROLLING_STATS = ["PTS", "REB", "AST", "STL", "BLK", "TOV", "PF",
+                 "FG_PCT", "FG3_PCT", "FT_PCT", "PLUS_MINUS"]
+
+ROLLING_COLS = []
+for _stat in ROLLING_STATS + ["WIN_RATE", "GAMES"]:
+    for _w in [10, 30]:
+        ROLLING_COLS.append(f"{_stat}_{_w}")
+
+# 52 raw rolling feature columns
+FEATURE_COLS = [f"HOME_{c}" for c in ROLLING_COLS] + [f"AWAY_{c}" for c in ROLLING_COLS]
+
+# 8 derived difference features (home minus away)
+DIFF_FEATURES = {
+    "DIFF_PTS_10": ("HOME_PTS_10", "AWAY_PTS_10"),
+    "DIFF_PTS_30": ("HOME_PTS_30", "AWAY_PTS_30"),
+    "DIFF_WIN_RATE_10": ("HOME_WIN_RATE_10", "AWAY_WIN_RATE_10"),
+    "DIFF_WIN_RATE_30": ("HOME_WIN_RATE_30", "AWAY_WIN_RATE_30"),
+    "DIFF_PLUS_MINUS_10": ("HOME_PLUS_MINUS_10", "AWAY_PLUS_MINUS_10"),
+    "DIFF_PLUS_MINUS_30": ("HOME_PLUS_MINUS_30", "AWAY_PLUS_MINUS_30"),
+    "DIFF_FG_PCT_10": ("HOME_FG_PCT_10", "AWAY_FG_PCT_10"),
+    "DIFF_FG_PCT_30": ("HOME_FG_PCT_30", "AWAY_FG_PCT_30"),
+}
+
+ALL_FEATURES = FEATURE_COLS + list(DIFF_FEATURES.keys())
+
+
+# ---------------------------------------------------------------------------
+# 1. Fetch training data
+# ---------------------------------------------------------------------------
+def fetch_training_data():
+    """Fetch completed gamelogs (GAME_STATUS 3 or 4) with known outcome."""
+    logger.info("Fetching completed gamelogs from Supabase...")
+
+    # Fetch status=3 and status=4 separately, then combine
+    rows_3 = fetch_paginated("gamelogs", "*", [("eq", "GAME_STATUS", 3)])
+    rows_4 = fetch_paginated("gamelogs", "*", [("eq", "GAME_STATUS", 4)])
+    all_rows = rows_3 + rows_4
+
+    if not all_rows:
+        logger.error("No completed gamelogs found. Run gamelogs.py first.")
+        sys.exit(1)
+
+    df = pd.DataFrame(all_rows)
+    logger.info(f"  Fetched {len(df)} rows (status 3: {len(rows_3)}, status 4: {len(rows_4)})")
+
+    # Filter to rows with known outcome
+    df["GAME_OUTCOME"] = pd.to_numeric(df["GAME_OUTCOME"], errors="coerce")
+    df = df[df["GAME_OUTCOME"].notna()].copy()
+    logger.info(f"  {len(df)} rows with known GAME_OUTCOME")
+
+    df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], utc=True)
+
+    # Cast feature columns to float
+    for col in FEATURE_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 2. Build feature matrix
+# ---------------------------------------------------------------------------
+def add_diff_features(df):
+    """Add derived difference features (home minus away)."""
+    for name, (home_col, away_col) in DIFF_FEATURES.items():
+        if home_col in df.columns and away_col in df.columns:
+            df[name] = df[home_col] - df[away_col]
+        else:
+            df[name] = np.nan
+    return df
+
+
+def build_feature_matrix(df):
+    """Extract features and target, dropping rows with null features."""
+    df = add_diff_features(df)
+
+    # Drop rows where any raw rolling feature is null (early-season)
+    before = len(df)
+    df = df.dropna(subset=FEATURE_COLS)
+    dropped = before - len(df)
+    if dropped > 0:
+        logger.info(f"  Dropped {dropped} rows with null rolling features (early season)")
+
+    if len(df) < 100:
+        logger.warning(f"Only {len(df)} training samples — results may be unreliable")
+
+    X = df[ALL_FEATURES].astype(float)
+    y = df["GAME_OUTCOME"].astype(int)
+
+    return X, y, df
+
+
+# ---------------------------------------------------------------------------
+# 3. Chronological train/test split
+# ---------------------------------------------------------------------------
+def time_split(X, y, df, test_fraction=0.20):
+    """Split data chronologically. Last test_fraction by date goes to test."""
+    sorted_idx = df["GAME_DATE"].sort_values().index
+    X = X.loc[sorted_idx]
+    y = y.loc[sorted_idx]
+    df = df.loc[sorted_idx]
+
+    cutoff = int(len(X) * (1 - test_fraction))
+
+    X_train, X_test = X.iloc[:cutoff], X.iloc[cutoff:]
+    y_train, y_test = y.iloc[:cutoff], y.iloc[cutoff:]
+
+    train_end = df.iloc[cutoff - 1]["GAME_DATE"]
+    test_start = df.iloc[cutoff]["GAME_DATE"]
+
+    logger.info(f"  Train: {len(X_train)} games (through {train_end.date()})")
+    logger.info(f"  Test:  {len(X_test)} games (from {test_start.date()})")
+    logger.info(f"  Train home-win rate: {y_train.mean():.3f}")
+    logger.info(f"  Test  home-win rate: {y_test.mean():.3f}")
+
+    return X_train, X_test, y_train, y_test
+
+
+# ---------------------------------------------------------------------------
+# 4. Train model
+# ---------------------------------------------------------------------------
+def train_model(X_train, y_train, X_test, y_test):
+    """Train XGBoost classifier with early stopping."""
+    logger.info("Training XGBoost classifier...")
+
+    model = xgb.XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="auc",
+        n_estimators=300,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=5,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        verbosity=1,
+        early_stopping_rounds=30,
+    )
+
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_test, y_test)],
+        verbose=True,
+    )
+
+    logger.info(f"  Best iteration: {model.best_iteration}")
+    return model
+
+
+# ---------------------------------------------------------------------------
+# 5. Evaluate model
+# ---------------------------------------------------------------------------
+def evaluate_model(model, X_test, y_test):
+    """Print evaluation metrics and feature importances."""
+    y_prob = model.predict_proba(X_test)[:, 1]
+    y_pred = model.predict(X_test)
+
+    auc = roc_auc_score(y_test, y_prob)
+    acc = accuracy_score(y_test, y_pred)
+
+    print("\n" + "=" * 60)
+    print("MODEL EVALUATION")
+    print("=" * 60)
+    print(f"  ROC-AUC:  {auc:.4f}")
+    print(f"  Accuracy: {acc:.4f} ({(y_pred == y_test).sum()}/{len(y_test)})")
+    print()
+    print(classification_report(y_test, y_pred, target_names=["Away Win", "Home Win"]))
+
+    # Feature importances (top 15)
+    importance = model.feature_importances_
+    feat_imp = pd.Series(importance, index=ALL_FEATURES).sort_values(ascending=False)
+    print("Top 15 Feature Importances:")
+    print("-" * 40)
+    for feat, imp in feat_imp.head(15).items():
+        print(f"  {feat:<30s} {imp:.4f}")
+    print()
+
+    return auc, acc
+
+
+# ---------------------------------------------------------------------------
+# 6. Save model
+# ---------------------------------------------------------------------------
+def save_model(model, path):
+    """Save XGBoost model to JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    model.save_model(str(path))
+    logger.info(f"Model saved to {path}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    start = datetime.now(timezone.utc)
+    logger.info("=== NBA GAME OUTCOME MODEL — TRAINING ===")
+
+    # Fetch
+    df = fetch_training_data()
+
+    # Features
+    logger.info("Building feature matrix...")
+    X, y, df = build_feature_matrix(df)
+    logger.info(f"  {len(X)} samples, {len(ALL_FEATURES)} features")
+    logger.info(f"  Overall home-win rate: {y.mean():.3f}")
+
+    # Split
+    logger.info("Splitting train/test (chronological 80/20)...")
+    X_train, X_test, y_train, y_test = time_split(X, y, df)
+
+    # Train
+    model = train_model(X_train, y_train, X_test, y_test)
+
+    # Evaluate
+    auc, acc = evaluate_model(model, X_test, y_test)
+
+    # Save
+    save_model(model, MODEL_PATH)
+
+    elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+    logger.info(f"=== TRAINING COMPLETE in {elapsed:.1f}s | AUC={auc:.4f} | Acc={acc:.4f} ===")
+
+
+if __name__ == "__main__":
+    main()
