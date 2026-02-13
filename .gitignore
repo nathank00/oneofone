@@ -10,3 +10,12 @@ __pycache__
 # web
 node_modules
 .next
+
+# desktop
+desktop/src-tauri/target
+desktop/dist
+
+# Resilio Sync artifacts
+*.rsls
+*.rslsc
+.sync
