@@ -1,21 +1,18 @@
-<p align="center">
-  <h1 align="center">[ ONE OF ONE ]</h1>
-  <p align="center">
-    Sports prediction engine built on gradient-boosted models + automated Kalshi market execution
-    <br />
-    <a href="https://github.com/nathank00/oneofone/releases/latest"><strong>Download Desktop App</strong></a>
-    &nbsp;&middot;&nbsp;
-    <a href="#architecture">Architecture</a>
-    &nbsp;&middot;&nbsp;
-    <a href="#pipelines">Pipelines</a>
-  </p>
-</p>
+<div align="center">
+
+# [ ONE OF ONE ]
+
+**Machine learning sports prediction engine** — ensemble tree classification modeling of players and teams, with automated prediction market execution
+
+<br />
+
+[Architecture](#architecture) · [Pipelines](#pipelines) · [Download Desktop App](https://github.com/nathank00/oneofone/releases/latest)
+
+</div>
 
 ---
 
-## ONE OF ONE
-
-ONE OF ONE is an end-to-end sports prediction platform. It ingests raw game data from official league APIs, engineers rolling statistical features at the player and team level, trains XGBoost classifiers on historical outcomes, and produces daily win-probability predictions. Those predictions are surfaced through a web dashboard and fed into a desktop trading application that identifies and executes edge opportunities on [Kalshi](https://kalshi.com) prediction markets.
+ONE OF ONE is an end-to-end sports prediction platform. It ingests raw game data from official league APIs, engineers rolling statistical features at the player and team level, and trains XGBoost classifiers on historical outcomes to produce live win-probability predictions. Those predictions are surfaced through a public web dashboard and fed into a desktop trading application that detects and executes edge opportunities on [Kalshi](https://kalshi.com) prediction markets.
 
 | Component | What it does | Tech |
 |-----------|-------------|------|
