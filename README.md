@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">[ ONE OF ONE ]</h1>
   <p align="center">
-    AI-powered sports prediction engine + automated Kalshi trading
+    Sports prediction engine built on gradient-boosted models + automated Kalshi market execution
     <br />
     <a href="https://github.com/nathank00/oneofone/releases/latest"><strong>Download Desktop App</strong></a>
     &nbsp;&middot;&nbsp;
@@ -15,7 +15,7 @@
 
 ## ONE OF ONE
 
-ONE OF ONE is a sports prediction platform that trains ML models on historical game data, generates daily win predictions, and trades on those predictions through [Kalshi](https://kalshi.com) prediction markets.
+ONE OF ONE is an end-to-end sports prediction platform. It ingests raw game data from official league APIs, engineers rolling statistical features at the player and team level, trains XGBoost classifiers on historical outcomes, and produces daily win-probability predictions. Those predictions are surfaced through a web dashboard and fed into a desktop trading application that identifies and executes edge opportunities on [Kalshi](https://kalshi.com) prediction markets.
 
 | Component | What it does | Tech |
 |-----------|-------------|------|
@@ -29,21 +29,21 @@ ONE OF ONE is a sports prediction platform that trains ML models on historical g
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         SUPABASE (PostgreSQL)                       │
-│                                                                     │
-│  nba_gamelogs  │  mlb_gamelogs  │  players  │  playerstats  │ ...  │
-└──────────────┬──────────────────┬──────────────────┬────────────────┘
-               │                  │                  │
-         ┌─────┴─────┐    ┌──────┴──────┐    ┌──────┴──────┐
-         │ PIPELINES  │    │     WEB     │    │   DESKTOP   │
-         │  (writes)  │    │   (reads)   │    │   (reads)   │
-         └─────┬─────┘    └─────────────┘    └──────┬──────┘
-               │                                     │
-        ┌──────┴──────┐                       ┌──────┴──────┐
-        │  nba_api /  │                       │  Kalshi API │
-        │  MLB Stats  │                       │  (trading)  │
-        └─────────────┘                       └─────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                       SUPABASE (PostgreSQL)                        │
+│                                                                    │
+│  nba_gamelogs │ mlb_gamelogs │ players │ playerstats │ games │ ... │
+└──────┬─────────────────┬─────────────────────┬─────────────────────┘
+       │                 │                     │
+ ┌─────┴─────┐    ┌──────┴──────┐       ┌─────┴──────┐
+ │ PIPELINES │    │     WEB     │       │  DESKTOP   │
+ │  (writes) │    │   (reads)   │       │  (reads)   │
+ └─────┬─────┘    └─────────────┘       └─────┬──────┘
+       │                                      │
+ ┌─────┴──────┐                        ┌──────┴──────┐
+ │  nba_api / │                        │ Kalshi API  │
+ │ MLB Stats  │                        │  (trading)  │
+ └────────────┘                        └─────────────┘
 ```
 
 ---
@@ -53,26 +53,25 @@ ONE OF ONE is a sports prediction platform that trains ML models on historical g
 Both pipelines follow the same six-stage architecture. Each stage has a **full** mode (backfill from scratch) and a **current** mode (incremental delta updates). All rolling stats use `shift(1)` to prevent data leakage — the model only sees information that was available before game time.
 
 ```
-    ┌──────────┐    ┌──────────┐    ┌────────────┐
-    │  games   │    │ players  │    │ playerstats │
-    │  .py     │    │  .py     │    │    .py      │
-    └────┬─────┘    └────┬─────┘    └──────┬──────┘
-         │               │                 │
-         └───────────────┼─────────────────┘
-                         ▼
-                  ┌──────────────┐
-                  │  gamelogs.py │   Feature engineering
-                  │  (rolling)   │   (no data leakage)
-                  └──────┬───────┘
-                         │
-                  ┌──────┴───────┐
-                  │   train.py   │   XGBoost classifier
-                  └──────┬───────┘
-                         │
-                  ┌──────┴───────┐
-                  │  predict.py  │   Daily inference
-                  │              │   → Supabase
-                  └──────────────┘
+ ┌───────────┐    ┌───────────┐    ┌──────────────┐
+ │  games.py │    │ players.py│    │playerstats.py│
+ └─────┬─────┘    └─────┬─────┘    └──────┬───────┘
+       │                │                  │
+       └────────────────┼──────────────────┘
+                        ▼
+                 ┌─────────────┐
+                 │ gamelogs.py │  Feature engineering
+                 │  (rolling)  │  (no data leakage)
+                 └──────┬──────┘
+                        │
+                 ┌──────┴──────┐
+                 │  train.py   │  XGBoost classifier
+                 └──────┬──────┘
+                        │
+                 ┌──────┴──────┐
+                 │ predict.py  │  Daily inference
+                 │             │  → Supabase
+                 └─────────────┘
 ```
 
 Each pipeline is orchestrated by a `run_pipeline.py` at the pipeline root. The orchestrator chains the stages in the correct order and handles logging/error propagation.
@@ -153,43 +152,43 @@ Each sport page shows a date picker, prediction cards with confidence percentage
 ```
 oneofone/
 ├── .github/workflows/
-│   ├── nba-pipeline.yml        # Scheduled automation (3x daily)
-│   └── mlb-pipeline.yml        # Scheduled automation (daily + live)
+│   ├── nba-pipeline.yml          # Scheduled automation (3x daily)
+│   └── mlb-pipeline.yml          # Scheduled automation (daily + live)
 │
-├── nba-pipeline/               # NBA prediction pipeline
+├── nba-pipeline/                 # NBA prediction pipeline
 │   ├── src/
-│   │   ├── games.py            # Game + roster ingestion
-│   │   ├── players.py          # Player metadata
-│   │   ├── playerstats.py      # Per-player game stats
-│   │   ├── gamelogs.py         # Rolling feature engineering
-│   │   ├── train.py            # XGBoost training
-│   │   └── predict.py          # Daily inference
-│   ├── run_pipeline.py         # Orchestrator (historical / current)
+│   │   ├── games.py              # Game + roster ingestion
+│   │   ├── players.py            # Player metadata
+│   │   ├── playerstats.py        # Per-player game stats
+│   │   ├── gamelogs.py           # Rolling feature engineering
+│   │   ├── train.py              # XGBoost training
+│   │   └── predict.py            # Daily inference
+│   ├── run_pipeline.py           # Orchestrator (historical / current)
 │   └── models/
 │
-├── mlb-pipeline/               # MLB prediction pipeline
+├── mlb-pipeline/                 # MLB prediction pipeline
 │   ├── src/
-│   │   ├── games.py            # Schedule + lineup ingestion
-│   │   ├── players.py          # Player metadata + type classification
-│   │   ├── playerstats.py      # Per-player batting/pitching gamelogs
-│   │   ├── gamelogs.py         # Lineup-weighted feature engineering
-│   │   ├── train.py            # XGBoost training
-│   │   └── predict.py          # Daily inference
-│   ├── run_pipeline.py         # Orchestrator (historical / current / live)
+│   │   ├── games.py              # Schedule + lineup ingestion
+│   │   ├── players.py            # Player metadata + type classification
+│   │   ├── playerstats.py        # Per-player batting/pitching gamelogs
+│   │   ├── gamelogs.py           # Lineup-weighted feature engineering
+│   │   ├── train.py              # XGBoost training
+│   │   └── predict.py            # Daily inference
+│   ├── run_pipeline.py           # Orchestrator (historical / current / live)
 │   ├── models/
 │   └── migrations/
 │
-├── web/                        # Next.js dashboard
+├── web/                          # Next.js dashboard
 │   └── src/
-│       ├── app/                # Pages (/, /nba, /mlb)
-│       ├── components/         # Dashboard, PredictionCard, DatePicker
-│       └── lib/                # Supabase client, types, date helpers
+│       ├── app/                  # Pages (/, /nba, /mlb)
+│       ├── components/           # Dashboard, PredictionCard, DatePicker
+│       └── lib/                  # Supabase client, types, date helpers
 │
-├── desktop/                    # Tauri trading app
-│   ├── src/                    # React frontend
-│   └── src-tauri/src/          # Rust backend (Kalshi auth, scanner)
+├── desktop/                      # Tauri trading app
+│   ├── src/                      # React frontend
+│   └── src-tauri/src/            # Rust backend (Kalshi auth, scanner)
 │
-└── shared/                     # Constants, schemas
+└── shared/                       # Constants, schemas
     ├── nba/
     ├── mlb/
     └── schemas/
@@ -200,25 +199,19 @@ oneofone/
 ## Tech Stack
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        ONE OF ONE                                │
-├──────────────┬──────────────────┬────────────────────────────────┤
-│  Pipelines   │       Web        │           Desktop              │
-├──────────────┼──────────────────┼────────────────────────────────┤
-│ Python 3.12  │ Next.js 16       │ Tauri 2 (Rust)                 │
-│ XGBoost      │ React 19         │ React 19 + Vite                │
-│ pandas/numpy │ Tailwind CSS 4   │ Tailwind CSS 4                 │
-│ nba_api      │ Supabase JS      │ reqwest + tokio                │
-│ MLB Stats API│ TypeScript 5     │ rsa (PKCS#1/PKCS#8)            │
-│ supabase-py  │ Vercel           │ serde + chrono                 │
-└──────────────┴──────────────────┴────────────────────────────────┘
-                         │
-                    Supabase
-                   (PostgreSQL)
+┌───────────────────────────────────────────────────────────────┐
+│                        ONE OF ONE                             │
+├──────────────┬─────────────────┬──────────────────────────────┤
+│  Pipelines   │      Web        │          Desktop             │
+├──────────────┼─────────────────┼──────────────────────────────┤
+│ Python 3.12  │ Next.js 16      │ Tauri 2 (Rust)               │
+│ XGBoost      │ React 19        │ React 19 + Vite              │
+│ pandas/numpy │ Tailwind CSS 4  │ Tailwind CSS 4               │
+│ nba_api      │ Supabase JS     │ reqwest + tokio              │
+│ MLB Stats API│ TypeScript 5    │ rsa (PKCS#1/PKCS#8)          │
+│ supabase-py  │ Vercel          │ serde + chrono               │
+└──────────────┴─────────────────┴──────────────────────────────┘
+                        │
+                   Supabase
+                  (PostgreSQL)
 ```
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE) for details.

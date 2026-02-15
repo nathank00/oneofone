@@ -2,11 +2,9 @@
 venv
 *.env
 *.env.local
-*/models/*
 .claude
 *__pycache__
 __pycache__
-models
 
 # web
 node_modules

@@ -72,11 +72,11 @@ ALL_FEATURES = FEATURE_COLS + list(DIFF_FEATURES.keys())
 # 1. Load model
 # ---------------------------------------------------------------------------
 def load_model(path):
-    """Load XGBoost model from JSON file."""
+    """Load XGBoost model from JSON file. Returns None if not found."""
     if not path.exists():
-        logger.error(f"Model not found: {path}")
-        logger.error("Run train.py first to generate the model.")
-        sys.exit(1)
+        logger.warning(f"Model not found: {path}")
+        logger.warning("Run train.py first to generate the model.")
+        return None
 
     model = xgb.XGBClassifier()
     model.load_model(str(path))
@@ -255,6 +255,9 @@ def main():
 
     # Load model
     model = load_model(MODEL_PATH)
+    if model is None:
+        print("\n  No model found — skipping predictions. Run train.py first.\n")
+        return
 
     # Fetch today's scheduled games
     logger.info("Fetching today's scheduled games...")
