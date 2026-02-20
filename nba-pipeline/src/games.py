@@ -32,21 +32,18 @@ import logging
 import pandas as pd
 import numpy as np
 from supabase import create_client, Client
-from nba_api.stats.endpoints import (
-    leaguegamefinder,
-    scoreboardv2,
-    scheduleleaguev2,
-    commonteamroster,
-)
 from dotenv import load_dotenv
 from tqdm import tqdm
 from multiprocessing import Pool
 import random
 from time import sleep
-import requests
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
-import functools
+
+from shared.nba.nba_api_client import (
+    fetch_game_finder,
+    fetch_schedule,
+    fetch_scoreboard,
+    fetch_team_roster,
+)
 
 load_dotenv()
 
@@ -73,38 +70,6 @@ GAME_OUTCOME_AWAY_WIN = 0
 
 # All 30 NBA team IDs for roster fetching
 ALL_TEAM_IDS = list(TEAM_NAME_TO_ID.values())
-
-
-# ---------------------------------------------------------------------------
-# Rate-limit-safe HTTP session (retries on 429/5xx with backoff)
-# ---------------------------------------------------------------------------
-def create_session_with_retries():
-    session = requests.Session()
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("https://", adapter)
-    return session
-
-
-def patch_requests_get():
-    original_get = requests.get
-    session = create_session_with_retries()
-
-    @functools.wraps(original_get)
-    def patched_get(*args, **kwargs):
-        return session.get(*args, **kwargs)
-
-    requests.get = patched_get
-    return original_get
-
-
-def restore_requests_get(original_get):
-    requests.get = original_get
 
 
 # ---------------------------------------------------------------------------
@@ -144,12 +109,7 @@ def fetch_completed_games_for_season(season_str):
     """
     try:
         sleep(random.uniform(0.8, 1.5))
-        finder = leaguegamefinder.LeagueGameFinder(
-            season_nullable=season_str,
-            league_id_nullable="00",
-            season_type_nullable="Regular Season",
-        )
-        raw = finder.get_data_frames()[0]
+        raw = fetch_game_finder(season=season_str)[0]
         if raw.empty:
             logger.info(f"  0 games from LeagueGameFinder for {season_str}")
             return pd.DataFrame()
@@ -256,11 +216,7 @@ def fetch_schedule_for_season(season_str):
     """
     try:
         sleep(random.uniform(0.8, 1.5))
-        sched = scheduleleaguev2.ScheduleLeagueV2(
-            season=season_str,
-            league_id="00",
-        )
-        frames = sched.get_data_frames()
+        frames = fetch_schedule(season_str)
         if not frames or frames[0].empty:
             logger.info(f"  0 games from ScheduleLeagueV2 for {season_str}")
             return pd.DataFrame()
@@ -350,8 +306,7 @@ def fetch_scoreboard_for_date(game_date):
             date_str = et.strftime("%Y-%m-%d")
         else:
             date_str = game_date.strftime("%Y-%m-%d")
-        sb = scoreboardv2.ScoreboardV2(game_date=date_str, league_id="00")
-        frames = sb.get_data_frames()
+        frames = fetch_scoreboard(date_str)
 
         game_header = frames[0]  # GameHeader
         line_score = frames[1]   # LineScore
@@ -435,12 +390,7 @@ def _fetch_roster_for_team(args):
     team_id, season_str = args
     try:
         sleep(random.uniform(1.0, 2.0))
-        roster = commonteamroster.CommonTeamRoster(
-            team_id=str(team_id),
-            season=season_str,
-            league_id_nullable="00",
-        )
-        df = roster.get_data_frames()[0]
+        df = fetch_team_roster(team_id, season_str)[0]
         if df.empty:
             return {"team_id": int(team_id), "player_ids": []}
         player_ids = df["PLAYER_ID"].astype(int).tolist()
@@ -458,20 +408,16 @@ def fetch_rosters_for_season(season_str):
     """
     args = [(tid, season_str) for tid in ALL_TEAM_IDS]
 
-    original_get = patch_requests_get()
-    try:
-        rosters = {}
-        with Pool(8) as pool:
-            results = list(tqdm(
-                pool.imap_unordered(_fetch_roster_for_team, args),
-                total=len(args),
-                desc=f"Rosters {season_str}",
-            ))
-        for r in results:
-            rosters[r["team_id"]] = r["player_ids"]
-        return rosters
-    finally:
-        restore_requests_get(original_get)
+    rosters = {}
+    with Pool(8) as pool:
+        results = list(tqdm(
+            pool.imap_unordered(_fetch_roster_for_team, args),
+            total=len(args),
+            desc=f"Rosters {season_str}",
+        ))
+    for r in results:
+        rosters[r["team_id"]] = r["player_ids"]
+    return rosters
 
 
 def attach_rosters(games_df, season_rosters):
@@ -798,13 +744,10 @@ def run_current_mode():
     logger.info("Step 1: Fetching recent completed games...")
     try:
         sleep(random.uniform(0.8, 1.5))
-        finder = leaguegamefinder.LeagueGameFinder(
-            date_from_nullable=date_from.strftime("%m/%d/%Y"),
-            date_to_nullable=date_to.strftime("%m/%d/%Y"),
-            league_id_nullable="00",
-            season_type_nullable="Regular Season",
-        )
-        raw = finder.get_data_frames()[0]
+        raw = fetch_game_finder(
+            date_from=date_from.strftime("%m/%d/%Y"),
+            date_to=date_to.strftime("%m/%d/%Y"),
+        )[0]
     except Exception as e:
         logger.error(f"LeagueGameFinder date range failed: {e}")
         raw = pd.DataFrame()

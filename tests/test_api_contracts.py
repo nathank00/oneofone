@@ -274,7 +274,7 @@ class TestMLBPlayerStatsAPI:
 
 
 # ===========================================================================
-# NBA API (via nba_api library)
+# NBA API (via shared.nba.nba_api_client)
 # ===========================================================================
 @pytest.mark.api
 class TestNBALeagueGameFinderAPI:
@@ -282,15 +282,10 @@ class TestNBALeagueGameFinderAPI:
 
     def test_returns_dataframe_with_expected_columns(self):
         try:
-            from nba_api.stats.endpoints import leaguegamefinder
-            import time
-            time.sleep(1)
-            finder = leaguegamefinder.LeagueGameFinder(
-                season_nullable="2023-24",
-                league_id_nullable="00",
-                season_type_nullable="Regular Season",
-            )
-            raw = finder.get_data_frames()[0]
+            import sys
+            sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+            from shared.nba.nba_api_client import fetch_game_finder
+            raw = fetch_game_finder(season="2023-24")[0]
         except Exception as e:
             pytest.skip(f"NBA API unavailable: {e}")
 
@@ -304,15 +299,10 @@ class TestNBALeagueGameFinderAPI:
     def test_matchup_format_for_parsing(self):
         """Matchup strings should contain 'vs.' (home) or '@' (away)."""
         try:
-            from nba_api.stats.endpoints import leaguegamefinder
-            import time
-            time.sleep(1)
-            finder = leaguegamefinder.LeagueGameFinder(
-                season_nullable="2023-24",
-                league_id_nullable="00",
-                season_type_nullable="Regular Season",
-            )
-            raw = finder.get_data_frames()[0]
+            import sys
+            sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+            from shared.nba.nba_api_client import fetch_game_finder
+            raw = fetch_game_finder(season="2023-24")[0]
         except Exception as e:
             pytest.skip(f"NBA API unavailable: {e}")
 
@@ -329,14 +319,10 @@ class TestNBACommonAllPlayersAPI:
 
     def test_returns_players_with_expected_columns(self):
         try:
-            from nba_api.stats.endpoints import commonallplayers
-            import time
-            time.sleep(1)
-            players = commonallplayers.CommonAllPlayers(
-                is_only_current_season=0,
-                season="2023-24",
-            )
-            df = players.get_data_frames()[0]
+            import sys
+            sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+            from shared.nba.nba_api_client import fetch_all_players
+            df = fetch_all_players("2023-24")[0]
         except Exception as e:
             pytest.skip(f"NBA API unavailable: {e}")
 
@@ -349,14 +335,10 @@ class TestNBACommonAllPlayersAPI:
 
     def test_active_players_exist(self):
         try:
-            from nba_api.stats.endpoints import commonallplayers
-            import time
-            time.sleep(1)
-            players = commonallplayers.CommonAllPlayers(
-                is_only_current_season=0,
-                season="2023-24",
-            )
-            df = players.get_data_frames()[0]
+            import sys
+            sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+            from shared.nba.nba_api_client import fetch_all_players
+            df = fetch_all_players("2023-24")[0]
         except Exception as e:
             pytest.skip(f"NBA API unavailable: {e}")
 

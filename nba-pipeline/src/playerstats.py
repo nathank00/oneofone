@@ -27,15 +27,12 @@ import logging
 import pandas as pd
 import numpy as np
 from supabase import create_client, Client
-from nba_api.stats.endpoints import leaguegamelog
 from dotenv import load_dotenv
 from tqdm import tqdm
 import random
 from time import sleep
-import requests
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
-import functools
+
+from shared.nba.nba_api_client import fetch_league_game_log as _fetch_league_game_log
 
 
 def make_playerstats_id(game_id, player_id):
@@ -56,38 +53,6 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Missing Supabase env vars")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-
-# ---------------------------------------------------------------------------
-# Rate-limit-safe HTTP session (retries on 429/5xx with backoff)
-# ---------------------------------------------------------------------------
-def create_session_with_retries():
-    session = requests.Session()
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("https://", adapter)
-    return session
-
-
-def patch_requests_get():
-    original_get = requests.get
-    session = create_session_with_retries()
-
-    @functools.wraps(original_get)
-    def patched_get(*args, **kwargs):
-        return session.get(*args, **kwargs)
-
-    requests.get = patched_get
-    return original_get
-
-
-def restore_requests_get(original_get):
-    requests.get = original_get
 
 
 # ---------------------------------------------------------------------------
@@ -130,20 +95,12 @@ def fetch_league_gamelog_for_season(season_str, date_from=None, date_to=None):
     """
     try:
         sleep(random.uniform(0.8, 1.5))
-        kwargs = dict(
+        df = _fetch_league_game_log(
             season=season_str,
-            player_or_team_abbreviation="P",
-            season_type_all_star="Regular Season",
-            league_id="00",
-            timeout=120,
-        )
-        if date_from:
-            kwargs["date_from_nullable"] = date_from
-        if date_to:
-            kwargs["date_to_nullable"] = date_to
-
-        lg = leaguegamelog.LeagueGameLog(**kwargs)
-        df = lg.get_data_frames()[0]
+            player_or_team="P",
+            date_from=date_from,
+            date_to=date_to,
+        )[0]
         if df.empty:
             logger.info(f"  0 rows from LeagueGameLog for {season_str}")
             return pd.DataFrame()
@@ -398,6 +355,13 @@ def upsert_playerstats(df):
     records = df.to_dict(orient="records")
     payloads = [_build_payload(r) for r in records]
 
+    # Sanitize NaN → None for JSON serialization (in-progress games have null stats)
+    import math
+    for p in payloads:
+        for k, v in p.items():
+            if isinstance(v, float) and math.isnan(v):
+                p[k] = None
+
     success = 0
     total_batches = (len(payloads) + UPSERT_BATCH_SIZE - 1) // UPSERT_BATCH_SIZE
 
@@ -436,21 +400,17 @@ def run_full_mode():
     seasons = [f"{y}-{str(y + 1)[-2:]}" for y in range(2020, current_year + 1)]
     logger.info(f"Full mode: {len(seasons)} seasons to process: {seasons}")
 
-    original_get = patch_requests_get()
     all_dfs = []
 
-    try:
-        # 1. Fetch all player gamelogs per season (~1 API call each)
-        for season_str in seasons:
-            logger.info(f"Step: Fetching LeagueGameLog for {season_str}...")
-            raw = fetch_league_gamelog_for_season(season_str)
-            if not raw.empty:
-                norm = normalize_league_gamelog(raw, season_str)
-                if not norm.empty:
-                    all_dfs.append(norm)
-                    logger.info(f"  {len(norm)} normalized rows for {season_str}")
-    finally:
-        restore_requests_get(original_get)
+    # 1. Fetch all player gamelogs per season (~1 API call each)
+    for season_str in seasons:
+        logger.info(f"Step: Fetching LeagueGameLog for {season_str}...")
+        raw = fetch_league_gamelog_for_season(season_str)
+        if not raw.empty:
+            norm = normalize_league_gamelog(raw, season_str)
+            if not norm.empty:
+                all_dfs.append(norm)
+                logger.info(f"  {len(norm)} normalized rows for {season_str}")
 
     if not all_dfs:
         logger.info("No player stats to process")
@@ -481,13 +441,9 @@ def run_incremental_mode():
     current_year = get_current_season_year()
     logger.info(f"Incremental mode: season {current_season}")
 
-    original_get = patch_requests_get()
-    try:
-        # 1. Fetch all player gamelogs for current season (1 API call)
-        logger.info("Step 1: Fetching LeagueGameLog for current season...")
-        raw = fetch_league_gamelog_for_season(current_season)
-    finally:
-        restore_requests_get(original_get)
+    # 1. Fetch all player gamelogs for current season (1 API call)
+    logger.info("Step 1: Fetching LeagueGameLog for current season...")
+    raw = fetch_league_gamelog_for_season(current_season)
 
     if raw.empty:
         logger.info("No player stats to process")
@@ -525,17 +481,13 @@ def run_current_mode():
     date_to = (now + timedelta(hours=12)).date()
     logger.info(f"Current mode: {date_from} to {date_to}")
 
-    original_get = patch_requests_get()
-    try:
-        # 1. Fetch player gamelogs for date range (1 API call)
-        logger.info("Step 1: Fetching LeagueGameLog for date range...")
-        raw = fetch_league_gamelog_for_season(
-            current_season,
-            date_from=date_from.strftime("%m/%d/%Y"),
-            date_to=date_to.strftime("%m/%d/%Y"),
-        )
-    finally:
-        restore_requests_get(original_get)
+    # 1. Fetch player gamelogs for date range (1 API call)
+    logger.info("Step 1: Fetching LeagueGameLog for date range...")
+    raw = fetch_league_gamelog_for_season(
+        current_season,
+        date_from=date_from.strftime("%m/%d/%Y"),
+        date_to=date_to.strftime("%m/%d/%Y"),
+    )
 
     if raw.empty:
         logger.info("No player stats for date range")

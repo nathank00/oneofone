@@ -20,8 +20,9 @@ import logging
 from datetime import datetime
 import pandas as pd
 from supabase import create_client, Client
-from nba_api.stats.endpoints import commonallplayers
 from dotenv import load_dotenv
+
+from shared.nba.nba_api_client import fetch_all_players as _fetch_all_players
 from tqdm import tqdm
 
 load_dotenv()
@@ -46,8 +47,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 def get_active_players(season):
     """Fetch active players for a season using commonallplayers."""
     try:
-        players = commonallplayers.CommonAllPlayers(is_only_current_season=0, season=season)
-        df = players.get_data_frames()[0]
+        df = _fetch_all_players(season)[0]
         if df.empty:
             print(f"0 players found for {season} from NBA API")
             return pd.DataFrame()
